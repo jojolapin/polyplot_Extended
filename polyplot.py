@@ -11,6 +11,7 @@ import pyperclip
 import webbrowser
 import threading
 import os
+import math
 from pathlib import Path
 
 # Import external modules for KML and Converter
@@ -312,6 +313,10 @@ class PolyPlotApp:
         # Global marker map
         self.global_point_map = {}
 
+        # Cached summary information
+        self.latest_summary_data = []
+        self.latest_points_sets = []
+
         # Setup UI
         self.setup_ui()
 
@@ -353,6 +358,18 @@ class PolyPlotApp:
                         background=COLORS['surface'],
                         foreground=COLORS['text'],
                         font=('Segoe UI', 10))
+
+        # Treeview style for summary tables
+        style.configure('Summary.Treeview',
+                        background=COLORS['surface'],
+                        fieldbackground=COLORS['surface'],
+                        foreground=COLORS['text'],
+                        rowheight=24,
+                        font=('Segoe UI', 9))
+        style.configure('Summary.Treeview.Heading',
+                        background=COLORS['surface'],
+                        foreground=COLORS['text'],
+                        font=('Segoe UI', 9, 'bold'))
 
     def center_window(self):
         """Center the window on screen"""
@@ -479,6 +496,49 @@ class PolyPlotApp:
 
     def setup_options_panel(self, parent):
         """Setup map options panel"""
+        # Coordinate conversion settings
+        coord_frame = ttk.LabelFrame(parent, text="Coordinate Settings", padding=10)
+        coord_frame.pack(fill='x', pady=(0, 15))
+
+        ttk.Label(coord_frame, text="Country preset:", style='Body.TLabel').pack(anchor='w')
+        country_values = ['Custom'] + sorted(COUNTRY_UTM_ZONES.keys())
+        self.country_var = tk.StringVar(value='Custom')
+        country_combo = ttk.Combobox(
+            coord_frame,
+            textvariable=self.country_var,
+            values=country_values,
+            state='readonly'
+        )
+        country_combo.pack(fill='x', pady=(5, 10))
+        country_combo.bind('<<ComboboxSelected>>', self.on_country_change)
+
+        ttk.Label(coord_frame, text="UTM Zone:", style='Body.TLabel').pack(anchor='w')
+        self.zone_var = tk.StringVar(value=str(COUNTRY_UTM_ZONES['Burkina Faso']))
+        zone_combo = ttk.Combobox(
+            coord_frame,
+            textvariable=self.zone_var,
+            values=[str(i) for i in range(1, 61)],
+            state='readonly'
+        )
+        zone_combo.pack(fill='x', pady=(5, 10))
+        zone_combo.bind('<<ComboboxSelected>>', self.on_zone_change)
+
+        self.northern_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            coord_frame,
+            text="Northern hemisphere",
+            variable=self.northern_var,
+            style='Modern.TCheckbutton',
+            command=self.on_hemisphere_toggle
+        ).pack(anchor='w')
+
+        ttk.Label(
+            coord_frame,
+            text="Configure the default UTM zone used when converting coordinates.",
+            style='Body.TLabel',
+            wraplength=220
+        ).pack(anchor='w', pady=(8, 0))
+
         # Map display options
         display_frame = ttk.LabelFrame(parent, text="Display Options", padding=10)
         display_frame.pack(fill='x', pady=(0, 15))
@@ -543,6 +603,45 @@ class PolyPlotApp:
         )
         export_data_btn.pack(fill='x')
 
+        # Summary card
+        summary_card = ModernCard(parent, title="Enclosure Summary")
+        summary_card.pack(fill='both', expand=True, pady=(15, 0))
+
+        tree_frame = ttk.Frame(summary_card, style='Card.TFrame')
+        tree_frame.pack(fill='both', expand=True)
+
+        columns = ('name', 'area_ha', 'perimeter', 'posts', 'cost')
+        self.summary_tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show='headings',
+            style='Summary.Treeview',
+            selectmode='browse'
+        )
+        self.summary_tree.heading('name', text='Enclosure')
+        self.summary_tree.heading('area_ha', text='Area (ha)')
+        self.summary_tree.heading('perimeter', text='Perimeter (m)')
+        self.summary_tree.heading('posts', text='Posts')
+        self.summary_tree.heading('cost', text='Cost (FCFA)')
+
+        self.summary_tree.column('name', width=110, anchor='w')
+        self.summary_tree.column('area_ha', width=80, anchor='e')
+        self.summary_tree.column('perimeter', width=100, anchor='e')
+        self.summary_tree.column('posts', width=60, anchor='center')
+        self.summary_tree.column('cost', width=100, anchor='e')
+
+        summary_scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=self.summary_tree.yview)
+        self.summary_tree.configure(yscrollcommand=summary_scrollbar.set)
+        self.summary_tree.pack(side='left', fill='both', expand=True)
+        summary_scrollbar.pack(side='right', fill='y')
+
+        self.summary_totals_var = tk.StringVar(value="No data loaded.")
+        totals_label = ttk.Label(summary_card, textvariable=self.summary_totals_var, style='Body.TLabel')
+        totals_label.pack(anchor='w', pady=(10, 0))
+
+        copy_btn = ModernButton(summary_card, "Copy Summary", command=self.copy_summary, style='outline')
+        copy_btn.pack(fill='x', pady=(10, 0))
+
     def setup_action_panel(self, parent):
         """Setup action buttons panel"""
         action_frame = ttk.Frame(parent, style='Main.TFrame')
@@ -566,6 +665,15 @@ class PolyPlotApp:
         )
         validate_btn.pack(side='left', padx=(0, 10))
 
+        # Calculate costs button
+        calculate_btn = ModernButton(
+            action_frame,
+            "Calculate Costs",
+            command=self.calculate_costs,
+            style='secondary'
+        )
+        calculate_btn.pack(side='right', padx=(10, 0))
+
         # Generate map button
         generate_btn = ModernButton(
             action_frame,
@@ -573,7 +681,7 @@ class PolyPlotApp:
             command=self.generate_map,
             style='primary'
         )
-        generate_btn.pack(side='right', padx=(10, 0))
+        generate_btn.pack(side='right', padx=(10, 10))
 
         # Open map button
         open_btn = ModernButton(
@@ -582,7 +690,7 @@ class PolyPlotApp:
             command=self.open_last_map,
             style='outline'
         )
-        open_btn.pack(side='right')
+        open_btn.pack(side='right', padx=(0, 10))
 
     def setup_status_bar(self):
         """Setup status bar"""
@@ -640,12 +748,18 @@ Enclosure 2
         self.points_entry.delete("1.0", tk.END)
         self.points_entry.insert("1.0", sample_data)
         self.update_status("Sample data loaded")
+        try:
+            points_sets = self.parse_input(sample_data)
+            self.update_summary(points_sets)
+        except Exception:
+            self.update_summary([])
 
     def clear_all(self):
         """Clear all input"""
         if messagebox.askyesno("Confirm", "Clear all input data?"):
             self.points_entry.delete("1.0", tk.END)
             self.update_status("Input cleared")
+            self.update_summary([])
 
     def validate_input(self):
         """Validate coordinate input"""
@@ -659,12 +773,15 @@ Enclosure 2
                     f"✓ Input is valid!\n\nFound {count} enclosure(s) with {total_points} total points."
                 )
                 self.update_status(f"Validation successful: {count} enclosures, {total_points} points")
+                self.update_summary(points_sets)
             else:
                 messagebox.showwarning("Validation Result", "No valid coordinate data found.")
                 self.update_status("Validation failed: No valid data")
+                self.update_summary([])
         except Exception as e:
             messagebox.showerror("Validation Error", f"Input validation failed:\n{str(e)}")
             self.update_status("Validation failed: Invalid format")
+            self.update_summary([])
 
     def generate_map(self):
         """Generate map with progress dialog"""
@@ -673,6 +790,8 @@ Enclosure 2
             if not points_sets:
                 messagebox.showwarning("Input Error", "No valid coordinate data found.")
                 return
+
+            self.update_summary(points_sets)
 
             # Create progress dialog
             progress = ProgressDialog(self.root, "Generating Map...")
@@ -725,6 +844,11 @@ Enclosure 2
                 self.points_entry.delete("1.0", tk.END)
                 self.points_entry.insert("1.0", content)
                 self.update_status(f"Coordinates loaded from {Path(file_path).name}")
+                try:
+                    points_sets = self.parse_input(content)
+                    self.update_summary(points_sets)
+                except Exception:
+                    self.update_summary([])
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
 
@@ -769,6 +893,7 @@ Enclosure 2
 
             if file_path:
                 import csv
+                zone, northern = self.get_coordinate_settings()
                 with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
                     writer = csv.writer(csvfile)
                     writer.writerow(['Enclosure', 'Area (m²)', 'Area (ha)', 'Perimeter (m)',
@@ -777,27 +902,20 @@ Enclosure 2
                     for point_set in points_sets:
                         name = point_set.get('name', 'Unnamed')
                         points = point_set['points']
+                        metrics = self.calculate_metrics(points, zone, northern)
+                        if not metrics:
+                            continue
 
-                        # Calculate metrics
-                        utm_points = [latlon_to_utm(lat, lon, 30, True) for lat, lon in points]
-                        polygon_utm = Polygon(utm_points)
-                        area_m2 = polygon_utm.area
-                        area_ha = area_m2 / 10000
-                        perimeter_m = polygon_utm.length
-
-                        # Cost calculations
-                        distance_piquets = parameters["distance_piquets"]
-                        cout_piquet = parameters["cout_piquet"]
-                        cout_grillage = parameters["cout_grillage"]
-
-                        nombre_piquets = int(perimeter_m / distance_piquets) + 1
-                        longueur_grillage = (perimeter_m // 25 + (1 if perimeter_m % 25 != 0 else 0)) * 25
-                        nombre_rouleaux = int(longueur_grillage / 25)
-                        cout_total = nombre_piquets * cout_piquet + nombre_rouleaux * cout_grillage
-
-                        writer.writerow([name, f"{area_m2:.2f}", f"{area_ha:.2f}", f"{perimeter_m:.2f}",
-                                         nombre_piquets, f"{longueur_grillage:.2f}", nombre_rouleaux,
-                                         f"{cout_total:.2f}"])
+                        writer.writerow([
+                            name,
+                            f"{metrics['area_m2']:.2f}",
+                            f"{metrics['area_ha']:.2f}",
+                            f"{metrics['perimeter_m']:.2f}",
+                            metrics['nombre_piquets'],
+                            f"{metrics['longueur_grillage']:.2f}",
+                            metrics['nombre_rouleaux'],
+                            f"{metrics['cout_total']:.2f}"
+                        ])
 
                 self.update_status(f"Calculations exported to {Path(file_path).name}")
                 messagebox.showinfo("Success", f"Calculations exported to:\n{file_path}")
@@ -842,12 +960,323 @@ Built with Python and modern GUI principles"""
 
         messagebox.showinfo("About PolyPlot", about_text)
 
-    def parse_input(self, entry_text):
+    def on_country_change(self, event=None):
+        """Update UTM zone when a country preset is selected"""
+        country = getattr(self, 'country_var', None)
+        if not country:
+            return
+
+        selected = country.get()
+        if selected in COUNTRY_UTM_ZONES:
+            self.zone_var.set(str(COUNTRY_UTM_ZONES[selected]))
+            self.update_status(f"UTM zone set to {self.zone_var.get()} for {selected}")
+        else:
+            self.update_status("Custom UTM zone selected")
+        self.refresh_summary_from_input()
+
+    def on_zone_change(self, event=None):
+        """Handle updates when the UTM zone combobox changes"""
+        try:
+            zone_value = int(self.zone_var.get())
+            self.update_status(f"UTM zone set to {zone_value}")
+        except (TypeError, ValueError):
+            self.update_status("Invalid UTM zone selection")
+        self.refresh_summary_from_input()
+
+    def on_hemisphere_toggle(self):
+        """Handle hemisphere toggles"""
+        hemisphere = "Northern" if self.northern_var.get() else "Southern"
+        self.update_status(f"Hemisphere set to {hemisphere}")
+        self.refresh_summary_from_input()
+
+    def get_coordinate_settings(self):
+        """Return the currently selected UTM zone and hemisphere"""
+        zone = 30
+        northern = True
+
+        if hasattr(self, 'zone_var'):
+            try:
+                zone = int(self.zone_var.get())
+            except (TypeError, ValueError):
+                zone = 30
+
+        if hasattr(self, 'northern_var'):
+            northern = bool(self.northern_var.get())
+
+        return zone, northern
+
+    def calculate_metrics(self, points, zone, northern):
+        """Calculate geometric and cost metrics for an enclosure"""
+        if len(points) < 3:
+            return None
+
+        utm_points = [latlon_to_utm(lat, lon, zone, northern) for lat, lon in points]
+        polygon_utm = Polygon(utm_points)
+        area_m2 = polygon_utm.area
+        area_ha = area_m2 / 10000
+        perimeter_m = polygon_utm.length
+
+        distance_piquets = parameters.get("distance_piquets", 0) or 0
+        cout_piquet = parameters.get("cout_piquet", 0) or 0
+        cout_grillage = parameters.get("cout_grillage", 0) or 0
+
+        if distance_piquets > 0:
+            nombre_piquets = max(1, math.ceil(perimeter_m / distance_piquets) + 1)
+        else:
+            nombre_piquets = 0
+
+        nombre_rouleaux = max(0, math.ceil(perimeter_m / 25))
+        longueur_grillage = nombre_rouleaux * 25
+        cout_total = nombre_piquets * cout_piquet + nombre_rouleaux * cout_grillage
+
+        centroid = polygon_utm.centroid
+        lat_c, lon_c = utm_to_wgs84(centroid.x, centroid.y, zone, northern)
+
+        return {
+            "area_m2": area_m2,
+            "area_ha": area_ha,
+            "perimeter_m": perimeter_m,
+            "nombre_piquets": nombre_piquets,
+            "nombre_rouleaux": nombre_rouleaux,
+            "longueur_grillage": longueur_grillage,
+            "cout_total": cout_total,
+            "centroid_lat": lat_c,
+            "centroid_lon": lon_c
+        }
+
+    def update_summary(self, points_sets):
+        """Update the enclosure summary table and totals"""
+        if not hasattr(self, 'summary_tree') or not hasattr(self, 'summary_totals_var'):
+            return
+
+        for item in self.summary_tree.get_children():
+            self.summary_tree.delete(item)
+
+        self.latest_summary_data = []
+        self.latest_points_sets = points_sets or []
+
+        if not points_sets:
+            self.summary_totals_var.set("No data loaded.")
+            return
+
+        zone, northern = self.get_coordinate_settings()
+
+        total_area = 0
+        total_perimeter = 0
+        total_posts = 0
+        total_cost = 0
+
+        for idx, point_set in enumerate(points_sets, start=1):
+            name = point_set.get('name', f"Enclosure {idx}")
+            points = point_set.get('points', [])
+            metrics = self.calculate_metrics(points, zone, northern)
+            if not metrics:
+                continue
+
+            total_area += metrics['area_ha']
+            total_perimeter += metrics['perimeter_m']
+            total_posts += metrics['nombre_piquets']
+            total_cost += metrics['cout_total']
+
+            self.summary_tree.insert(
+                '',
+                'end',
+                values=(
+                    name,
+                    f"{metrics['area_ha']:.2f}",
+                    f"{metrics['perimeter_m']:.2f}",
+                    metrics['nombre_piquets'],
+                    f"{metrics['cout_total']:.2f}"
+                )
+            )
+
+            self.latest_summary_data.append({
+                "name": name,
+                **metrics
+            })
+
+        if self.latest_summary_data:
+            self.summary_totals_var.set(
+                f"Total area: {total_area:.2f} ha | Perimeter: {total_perimeter:.2f} m | "
+                f"Posts: {total_posts} | Cost: {total_cost:.2f} FCFA"
+            )
+            self.update_status(
+                f"Summary updated for {len(self.latest_summary_data)} enclosure(s)"
+            )
+        else:
+            self.summary_totals_var.set("No valid enclosures found.")
+
+    def copy_summary(self):
+        """Copy summary data to clipboard"""
+        if not self.latest_summary_data:
+            messagebox.showwarning("Summary", "No summary data available to copy.")
+            return
+
+        lines = [
+            "Enclosure\tArea (m²)\tArea (ha)\tPerimeter (m)\tPosts\tMesh (m)\tMesh Rolls\tCost (FCFA)"
+        ]
+
+        total_area_m2 = 0
+        total_area_ha = 0
+        total_perimeter = 0
+        total_posts = 0
+        total_mesh = 0
+        total_rolls = 0
+        total_cost = 0
+
+        for entry in self.latest_summary_data:
+            lines.append(
+                f"{entry['name']}\t{entry['area_m2']:.2f}\t{entry['area_ha']:.2f}\t{entry['perimeter_m']:.2f}\t"
+                f"{entry['nombre_piquets']}\t{entry['longueur_grillage']:.2f}\t"
+                f"{entry['nombre_rouleaux']}\t{entry['cout_total']:.2f}"
+            )
+
+            total_area_m2 += entry['area_m2']
+            total_area_ha += entry['area_ha']
+            total_perimeter += entry['perimeter_m']
+            total_posts += entry['nombre_piquets']
+            total_mesh += entry['longueur_grillage']
+            total_rolls += entry['nombre_rouleaux']
+            total_cost += entry['cout_total']
+
+        lines.append(
+            f"TOTAL\t{total_area_m2:.2f}\t{total_area_ha:.2f}\t{total_perimeter:.2f}\t"
+            f"{total_posts}\t{total_mesh:.2f}\t{total_rolls}\t{total_cost:.2f}"
+        )
+
+        summary_text = "\n".join(lines)
+        try:
+            pyperclip.copy(summary_text)
+            self.update_status("Summary copied to clipboard")
+        except pyperclip.PyperclipException:
+            messagebox.showerror("Clipboard Error", "Unable to access the system clipboard.")
+
+    def calculate_costs(self):
+        """Calculate enclosure costs and display a detailed summary dialog"""
+        if not hasattr(self, 'points_entry'):
+            return
+
+        try:
+            points_sets = self.parse_input(self.points_entry.get("1.0", tk.END))
+        except Exception as exc:
+            messagebox.showerror("Input Error", str(exc))
+            return
+
+        if not points_sets:
+            messagebox.showwarning("Cost Calculation", "No valid enclosures available for cost calculation.")
+            self.update_summary([])
+            return
+
+        self.update_summary(points_sets)
+
+        if not self.latest_summary_data:
+            messagebox.showwarning("Cost Calculation", "No valid enclosures available for cost calculation.")
+            return
+
+        self.show_cost_summary_dialog()
+        self.update_status("Cost summary generated")
+
+    def show_cost_summary_dialog(self):
+        """Display a modal dialog with the latest cost summary"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Cost Summary")
+        dialog.configure(bg=COLORS['background'])
+        dialog.geometry("520x420")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        container = ttk.Frame(dialog, style='Main.TFrame', padding=20)
+        container.pack(fill='both', expand=True)
+
+        summary_card = ModernCard(container)
+        summary_card.pack(fill='both', expand=True)
+
+        ttk.Label(
+            summary_card,
+            text="Detailed Cost Summary",
+            style='Subtitle.TLabel'
+        ).pack(anchor='w', pady=(0, 10))
+
+        summary_text = scrolledtext.ScrolledText(
+            summary_card,
+            font=('Segoe UI', 10),
+            wrap='word',
+            height=12
+        )
+        summary_text.pack(fill='both', expand=True)
+
+        total_area_m2 = 0
+        total_area_ha = 0
+        total_perimeter = 0
+        total_posts = 0
+        total_mesh = 0
+        total_rolls = 0
+        total_cost = 0
+
+        for entry in self.latest_summary_data:
+            summary_text.insert(
+                tk.END,
+                (
+                    f"{entry['name']}\n"
+                    f"  Area: {entry['area_m2']:.2f} m² ({entry['area_ha']:.2f} ha)\n"
+                    f"  Perimeter: {entry['perimeter_m']:.2f} m\n"
+                    f"  Posts Needed: {entry['nombre_piquets']}\n"
+                    f"  Mesh Length: {entry['longueur_grillage']:.2f} m"
+                    f" ({entry['nombre_rouleaux']} rolls)\n"
+                    f"  Total Cost: {entry['cout_total']:.2f} FCFA\n\n"
+                )
+            )
+
+            total_area_m2 += entry['area_m2']
+            total_area_ha += entry['area_ha']
+            total_perimeter += entry['perimeter_m']
+            total_posts += entry['nombre_piquets']
+            total_mesh += entry['longueur_grillage']
+            total_rolls += entry['nombre_rouleaux']
+            total_cost += entry['cout_total']
+
+        summary_text.insert(
+            tk.END,
+            (
+                "TOTALS\n"
+                f"  Area: {total_area_m2:.2f} m² ({total_area_ha:.2f} ha)\n"
+                f"  Perimeter: {total_perimeter:.2f} m\n"
+                f"  Posts Needed: {total_posts}\n"
+                f"  Mesh Length: {total_mesh:.2f} m ({total_rolls} rolls)\n"
+                f"  Total Cost: {total_cost:.2f} FCFA\n"
+            )
+        )
+
+        summary_text.configure(state='disabled')
+
+        ModernButton(
+            summary_card,
+            "Close",
+            command=dialog.destroy,
+            style='outline'
+        ).pack(anchor='e', pady=(10, 0))
+
+    def refresh_summary_from_input(self):
+        """Re-parse current input and refresh the summary table"""
+        if not hasattr(self, 'points_entry'):
+            return
+
+        try:
+            points_sets = self.parse_input(self.points_entry.get("1.0", tk.END), show_warnings=False)
+            if points_sets:
+                self.update_summary(points_sets)
+            else:
+                self.update_summary([])
+        except Exception:
+            self.update_summary([])
+
+    def parse_input(self, entry_text, show_warnings=True):
         """Parse coordinate input with enhanced error handling"""
         try:
             # Split the input by blank lines; each block is an enclosure.
             raw_sets = re.split(r'\n\s*\n', entry_text.strip())
             points_sets = []
+            zone, northern = self.get_coordinate_settings()
 
             for raw_set in raw_sets:
                 lines = raw_set.strip().split("\n")
@@ -889,12 +1318,12 @@ Built with Python and modern GUI principles"""
                         points.append((val1, val2))
                     else:
                         # Convert from UTM to lat/lon
-                        lat, lon = utm_to_wgs84(val1, val2, zone=30)
+                        lat, lon = utm_to_wgs84(val1, val2, zone=zone, northern=northern)
                         points.append((lat, lon))
 
                 if len(points) >= 3:  # Need at least 3 points for a polygon
                     points_sets.append({"name": name, "points": points})
-                elif points:
+                elif points and show_warnings:
                     # Show warning for insufficient points
                     messagebox.showwarning(
                         "Warning",
@@ -923,26 +1352,19 @@ Built with Python and modern GUI principles"""
         line_points = list(wgs84_coordinates.values())
         line_points.append(line_points[0])  # Close the polygon
 
-        # Convert to UTM for area and perimeter calculations
-        utm_points = [latlon_to_utm(lat, lon, zone, northern) for lat, lon in points]
-        polygon_utm = Polygon(utm_points)
-        area_m2 = polygon_utm.area
-        area_ha = area_m2 / 10000
-        perimeter_m = polygon_utm.length
+        metrics = self.calculate_metrics(points, zone, northern)
+        if not metrics:
+            return mymap
 
-        # Cost and fencing calculations
-        distance_piquets = parameters["distance_piquets"]
-        cout_piquet = parameters["cout_piquet"]
-        cout_grillage = parameters["cout_grillage"]
-
-        nombre_piquets = int(perimeter_m / distance_piquets) + 1
-        longueur_grillage = (perimeter_m // 25 + (1 if perimeter_m % 25 != 0 else 0)) * 25
-        nombre_rouleaux = int(longueur_grillage / 25)
-        cout_total = nombre_piquets * cout_piquet + nombre_rouleaux * cout_grillage
-
-        # Centroid
-        centroid = polygon_utm.centroid
-        lat_c, lon_c = utm_to_wgs84(centroid.x, centroid.y, zone, northern)
+        area_m2 = metrics['area_m2']
+        area_ha = metrics['area_ha']
+        perimeter_m = metrics['perimeter_m']
+        nombre_piquets = metrics['nombre_piquets']
+        longueur_grillage = metrics['longueur_grillage']
+        nombre_rouleaux = metrics['nombre_rouleaux']
+        cout_total = metrics['cout_total']
+        lat_c = metrics['centroid_lat']
+        lon_c = metrics['centroid_lon']
 
         # Draw polygon outline
         folium.PolyLine(
@@ -1063,6 +1485,9 @@ Built with Python and modern GUI principles"""
             messagebox.showwarning("Input Error", "No points sets provided.")
             return
 
+        self.global_point_map.clear()
+        zone, northern = self.get_coordinate_settings()
+
         # Calculate map center from all points
         all_points = []
         for point_set in points_sets:
@@ -1102,6 +1527,7 @@ Built with Python and modern GUI principles"""
             mymap = self.add_points_to_map(
                 mymap, points, show_markers, show_popups, show_custom_icons,
                 random_colors, label_prefix, name=name,
+                zone=zone, northern=northern,
                 show_distance_markers=show_distance_markers
             )
 
