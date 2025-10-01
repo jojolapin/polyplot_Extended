@@ -1256,6 +1256,7 @@ Built with Python and modern GUI principles"""
             style='outline'
         ).pack(anchor='e', pady=(10, 0))
 
+> main
     def refresh_summary_from_input(self):
         """Re-parse current input and refresh the summary table"""
         if not hasattr(self, 'points_entry'):

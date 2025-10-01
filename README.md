@@ -12,9 +12,5 @@ PolyPlot is an interactive desktop tool for analysing land enclosures from coord
 - CSV export of calculations and Folium map generation with optional markers and popups
 
 ## Getting Started
-
-```bash
-python polyplot.py
-```
-
 Use the **Coordinate Settings** panel on the right-hand side to pick a country preset or manually select the UTM zone used for conversions. The **Enclosure Summary** panel updates whenever you validate input, load data or build a map, and the **Copy Summary** button makes it easy to share tabulated metrics. Tap **Calculate Costs** at the bottom of the window to open a detailed cost breakdown for every enclosure alongside project-wide totals.
+
