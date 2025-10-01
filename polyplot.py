@@ -665,6 +665,15 @@ class PolyPlotApp:
         )
         validate_btn.pack(side='left', padx=(0, 10))
 
+        # Calculate costs button
+        calculate_btn = ModernButton(
+            action_frame,
+            "Calculate Costs",
+            command=self.calculate_costs,
+            style='secondary'
+        )
+        calculate_btn.pack(side='right', padx=(10, 0))
+
         # Generate map button
         generate_btn = ModernButton(
             action_frame,
@@ -672,7 +681,7 @@ class PolyPlotApp:
             command=self.generate_map,
             style='primary'
         )
-        generate_btn.pack(side='right', padx=(10, 0))
+        generate_btn.pack(side='right', padx=(10, 10))
 
         # Open map button
         open_btn = ModernButton(
@@ -681,7 +690,7 @@ class PolyPlotApp:
             command=self.open_last_map,
             style='outline'
         )
-        open_btn.pack(side='right')
+        open_btn.pack(side='right', padx=(0, 10))
 
     def setup_status_bar(self):
         """Setup status bar"""
@@ -1142,6 +1151,112 @@ Built with Python and modern GUI principles"""
         except pyperclip.PyperclipException:
             messagebox.showerror("Clipboard Error", "Unable to access the system clipboard.")
 
+    def calculate_costs(self):
+        """Calculate enclosure costs and display a detailed summary dialog"""
+        if not hasattr(self, 'points_entry'):
+            return
+
+        try:
+            points_sets = self.parse_input(self.points_entry.get("1.0", tk.END))
+        except Exception as exc:
+            messagebox.showerror("Input Error", str(exc))
+            return
+
+        if not points_sets:
+            messagebox.showwarning("Cost Calculation", "No valid enclosures available for cost calculation.")
+            self.update_summary([])
+            return
+
+        self.update_summary(points_sets)
+
+        if not self.latest_summary_data:
+            messagebox.showwarning("Cost Calculation", "No valid enclosures available for cost calculation.")
+            return
+
+        self.show_cost_summary_dialog()
+        self.update_status("Cost summary generated")
+
+    def show_cost_summary_dialog(self):
+        """Display a modal dialog with the latest cost summary"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Cost Summary")
+        dialog.configure(bg=COLORS['background'])
+        dialog.geometry("520x420")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        container = ttk.Frame(dialog, style='Main.TFrame', padding=20)
+        container.pack(fill='both', expand=True)
+
+        summary_card = ModernCard(container)
+        summary_card.pack(fill='both', expand=True)
+
+        ttk.Label(
+            summary_card,
+            text="Detailed Cost Summary",
+            style='Subtitle.TLabel'
+        ).pack(anchor='w', pady=(0, 10))
+
+        summary_text = scrolledtext.ScrolledText(
+            summary_card,
+            font=('Segoe UI', 10),
+            wrap='word',
+            height=12
+        )
+        summary_text.pack(fill='both', expand=True)
+
+        total_area_m2 = 0
+        total_area_ha = 0
+        total_perimeter = 0
+        total_posts = 0
+        total_mesh = 0
+        total_rolls = 0
+        total_cost = 0
+
+        for entry in self.latest_summary_data:
+            summary_text.insert(
+                tk.END,
+                (
+                    f"{entry['name']}\n"
+                    f"  Area: {entry['area_m2']:.2f} m² ({entry['area_ha']:.2f} ha)\n"
+                    f"  Perimeter: {entry['perimeter_m']:.2f} m\n"
+                    f"  Posts Needed: {entry['nombre_piquets']}\n"
+                    f"  Mesh Length: {entry['longueur_grillage']:.2f} m"
+                    f" ({entry['nombre_rouleaux']} rolls)\n"
+                    f"  Total Cost: {entry['cout_total']:.2f} FCFA\n\n"
+                )
+            )
+
+            total_area_m2 += entry['area_m2']
+            total_area_ha += entry['area_ha']
+            total_perimeter += entry['perimeter_m']
+            total_posts += entry['nombre_piquets']
+            total_mesh += entry['longueur_grillage']
+            total_rolls += entry['nombre_rouleaux']
+            total_cost += entry['cout_total']
+
+        summary_text.insert(
+            tk.END,
+            (
+                "TOTALS\n"
+                f"  Area: {total_area_m2:.2f} m² ({total_area_ha:.2f} ha)\n"
+                f"  Perimeter: {total_perimeter:.2f} m\n"
+                f"  Posts Needed: {total_posts}\n"
+                f"  Mesh Length: {total_mesh:.2f} m ({total_rolls} rolls)\n"
+                f"  Total Cost: {total_cost:.2f} FCFA\n"
+            )
+        )
+
+        summary_text.configure(state='disabled')
+
+        ModernButton(
+            summary_card,
+            "Close",
+            command=dialog.destroy,
+            style='outline'
+        ).pack(anchor='e', pady=(10, 0))
+
+> main
     def refresh_summary_from_input(self):
         """Re-parse current input and refresh the summary table"""
         if not hasattr(self, 'points_entry'):
